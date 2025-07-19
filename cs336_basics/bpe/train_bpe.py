@@ -32,6 +32,7 @@ def train_bpe(
     init_start = time.perf_counter()
     tokenizer = BPETokenizer(special_tokens=special_tokens)
     timings['tokenizer_init'] = time.perf_counter() - init_start
+    print("Initialized tokenizer with special tokens:", special_tokens)
 
     pre_start = time.perf_counter()
     docs: List[DoublyLinkedList] = []
@@ -41,6 +42,7 @@ def train_bpe(
             dll.append(b)
         docs.append(dll)
     timings['pretokenization_and_build'] = time.perf_counter() - pre_start
+    print(f"Pre-tokenization complete, {len(docs)} documents processed.")
 
     count_start = time.perf_counter()
     pair_counts: Dict[Tuple[bytes,bytes], int] = {}
@@ -53,11 +55,13 @@ def train_bpe(
             pair_positions.setdefault(pair, set()).add(node)
             node = node.next
     timings['initial_count'] = time.perf_counter() - count_start
+    print(f"Initial pair counts computed, {len(pair_counts)} pairs found.")
 
     heap_start = time.perf_counter()
     heap: List[Tuple[int, Tuple[bytes,bytes]]] = [(-cnt, pair) for pair, cnt in pair_counts.items()]
     heapq.heapify(heap)
     timings['heap_build'] = time.perf_counter() - heap_start
+    print(f"Heap built with {len(heap)} pairs.")
 
     merge_start = time.perf_counter()
     merges: List[Tuple[bytes, bytes]] = []
@@ -119,6 +123,7 @@ def train_bpe(
                 pair_positions.setdefault(newq, set()).add(node)
                 heapq.heappush(heap, (-pair_counts[newq], newq))
     timings['merge_loop'] = time.perf_counter() - merge_start
+    print(f"Completed merging, {len(merges)} merges created.")
 
     timings['total_time'] = time.perf_counter() - t0
 
