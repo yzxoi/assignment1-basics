@@ -1,5 +1,7 @@
 import os
-from typing import BinaryIO
+from typing import BinaryIO, List, Tuple, Iterable
+import regex as re
+from multiprocessing import Pool
 
 def find_chunk_boundaries(
     file: BinaryIO, 
@@ -49,14 +51,42 @@ def find_chunk_boundaries(
     # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
     return sorted(set(chunk_boundaries))
 
-## Usage
-with open(..., "rb") as f:
-    boundaries = find_chunk_boundaries(
-        f, num_processes, "<|endoftext|>".encode("utf-8"))
-        
-    # The following is a serial implementation, but you can parallelize this 
-    # by sending each start/end pair to a set of processes.
-    for start, end in zip(boundaries[:-1], boundaries[1:]):
+def read_chunk(
+    file_path: str,
+    start: int,
+    end: int
+) -> List[bytes]:
+    """Read a chunk of the file from start to end byte offsets.
+    """
+    with open(file_path, "rb") as f:
         f.seek(start)
-        chunk = f.read(end - start).decode("utf-8", errors="ignore")
-        # Run pre-tokenization on your chunk and store the counts for each pre-token
+        chunk = f.read(end - start).decode('utf-8', errors='ignore')
+    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+    pre_tokens = re.findall(PAT, chunk)
+    return [token.encode('utf-8') for token in pre_tokens]
+
+## Usage
+# pretokenize_file("./data/TinyStoriesV2-GPT4-valid.txt",["<|endoftext|>"], 8)
+def pretokenize_file(
+    input_path: str, 
+    special_tokens: List[str],
+    num_processes: int = 1
+) -> Iterable[List[bytes]]:
+    """
+    Pre-tokenize a file by finding boundaries for special tokens.
+    Returns an iterable of (start, end) byte offsets for each chunk.
+    """
+    split_special_token = ''.join(special_tokens).encode('utf-8') if isinstance(special_tokens, list) else special_tokens.encode('utf-8')
+    with open(input_path, "rb") as f:
+        boundaries = find_chunk_boundaries(f, num_processes, split_special_token)
+    
+    chunks = [(input_path, start, end) for start, end in zip(boundaries[:-1], boundaries[1:])]
+    
+    if num_processes > 1:
+        with Pool(num_processes) as pool:
+            for token_list in pool.starmap(read_chunk, chunks):
+                yield token_list
+    else:
+        for path, start, end in chunks:
+            yield read_chunk(path, start, end)
+        
