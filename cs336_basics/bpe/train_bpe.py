@@ -5,6 +5,9 @@ from pretokenization import pretokenize_file
 from tokenizer import BPETokenizer
 from tqdm import tqdm
 from data_structures import DoublyLinkedList, Node
+from collections import defaultdict
+
+Pos = Tuple[int, int]                 # (doc_id, index)
 
 
 def train_bpe(
@@ -28,108 +31,88 @@ def train_bpe(
     """ 
     timings: Dict[str, float] = {}
     t0 = time.perf_counter()
-    
-    init_start = time.perf_counter()
-    tokenizer = BPETokenizer(special_tokens=special_tokens)
-    timings['tokenizer_init'] = time.perf_counter() - init_start
-    print("Initialized tokenizer with special tokens:", special_tokens)
 
-    pre_start = time.perf_counter()
-    docs: List[DoublyLinkedList] = []
-    for tok_bytes in pretokenize_file(str(input_path), special_tokens, num_processes):
-        print(tok_bytes[:10])
-        dll = DoublyLinkedList()
-        for b in tok_bytes:
-            dll.append(b)
-        docs.append(dll)
-    timings['pretokenization_and_build'] = time.perf_counter() - pre_start
-    print(f"Pre-tokenization complete, {len(docs)} documents processed.")
+    t = time.perf_counter()
+    tokenizer = BPETokenizer(special_tokens)
+    timings["tokenizer_init"] = time.perf_counter() - t
 
-    count_start = time.perf_counter()
-    pair_counts: Dict[Tuple[bytes,bytes], int] = {}
-    pair_positions: Dict[Tuple[bytes,bytes], Set[Node]] = {}
-    for dll in docs:
-        node = dll.head
-        while node and node.next:
-            pair = (node.value, node.next.value)
-            pair_counts[pair] = pair_counts.get(pair, 0) + 1
-            pair_positions.setdefault(pair, set()).add(node)
-            node = node.next
-    timings['initial_count'] = time.perf_counter() - count_start
-    print(f"Initial pair counts computed, {len(pair_counts)} pairs found.")
+    t = time.perf_counter()
+    docs: List[List[bytes]] = []
+    for tok_bytes in pretokenize_file(input_path, special_tokens, num_processes):
+        docs.append(list(tok_bytes))
+    timings["pretokenize"] = time.perf_counter() - t
+    print(f"[BPE] Loaded {len(docs):,} documents")
 
-    heap_start = time.perf_counter()
-    heap: List[Tuple[int, Tuple[bytes,bytes]]] = [(-cnt, pair) for pair, cnt in pair_counts.items()]
+    t = time.perf_counter()
+    pair_cnt : Dict[Tuple[bytes, bytes], int]  = defaultdict(int)
+    pair_pos : Dict[Tuple[bytes, bytes], Set[Pos]] = defaultdict(set)
+
+    for d, seq in enumerate(docs):
+        for i, (a, b) in enumerate(zip(seq, seq[1:])):
+            pair = (a, b)
+            pair_cnt[pair] += 1
+            pair_pos[pair].add((d, i))
+    timings["initial_count"] = time.perf_counter() - t
+
+    heap = [(-c, p) for p, c in pair_cnt.items()]
     heapq.heapify(heap)
-    timings['heap_build'] = time.perf_counter() - heap_start
-    print(f"Heap built with {len(heap)} pairs.")
 
-    merge_start = time.perf_counter()
     merges: List[Tuple[bytes, bytes]] = []
+    pbar = tqdm(total=vocab_size - len(tokenizer.vocab), desc="Training BPE")
 
-    pbar = tqdm(total=vocab_size - len(tokenizer.vocab), desc="Training BPE", unit="merge")
+    t_merge = time.perf_counter()
     while len(tokenizer.vocab) < vocab_size and heap:
-        negcnt, pair = heapq.heappop(heap)
-        cnt = -negcnt
-        if pair_counts.get(pair, 0) != cnt or cnt == 0:
+        neg_freq, pair = heapq.heappop(heap)
+        freq = -neg_freq
+        if freq == 0 or pair_cnt[pair] != freq:
             continue
-        pbar.update(1)
 
         a, b = pair
-        # print(a, b, "pair:", pair, "count:", cnt)
-        
-        merges.append(pair)
+        merged_token = a + b
         tokenizer.add_merge(pair)
+        merges.append(pair)
+        pbar.update(1)
 
-        nodes = list(pair_positions[pair])
-        del pair_positions[pair]
-        pair_counts[pair] = 0
+        positions = list(pair_pos[pair])
+        del pair_pos[pair]
+        pair_cnt[pair] = 0
 
-        for node in nodes:
-            if not node.next or node.value != a or node.next.value != b:
+        for d, idx in positions:
+            seq = docs[d]
+            if idx >= len(seq)-1 or seq[idx] != a or seq[idx+1] != b:
                 continue
 
-            left = node.prev
-            right = node.next.next
+            if idx > 0:
+                left_pair = (seq[idx-1], a)
+                pair_cnt[left_pair] -= 1
+                pair_pos[left_pair].discard((d, idx-1))
+                heapq.heappush(heap, (-pair_cnt[left_pair], left_pair))
 
-            if left:
-                old = (left.value, a)
-                if pair_counts.get(old, 0) == 0:
-                    continue
-                pair_counts[old] -= 1
-                pair_positions[old].discard(left)
-                heapq.heappush(heap, (-pair_counts[old], old))
-            if right:
-                old = (b, right.value)
-                if pair_counts.get(old, 0) == 0:
-                    continue
-                pair_counts[old] -= 1
-                pair_positions[old].discard(node.next)
-                heapq.heappush(heap, (-pair_counts[old], old))
+            if idx+2 < len(seq):
+                right_pair = (b, seq[idx+2])
+                pair_cnt[right_pair] -= 1
+                pair_pos[right_pair].discard((d, idx+1))
+                heapq.heappush(heap, (-pair_cnt[right_pair], right_pair))
 
-            to_rm = node.next
-            node.value = a + b
-            node.next = to_rm.next
-            if to_rm.next:
-                to_rm.next.prev = node
+            seq[idx:idx+2] = [merged_token]
 
-            if left:
-                newp = (left.value, a + b)
-                pair_counts[newp] = pair_counts.get(newp, 0) + 1
-                pair_positions.setdefault(newp, set()).add(left)
-                heapq.heappush(heap, (-pair_counts[newp], newp))
-            if right:
-                newq = (a + b, right.value)
-                pair_counts[newq] = pair_counts.get(newq, 0) + 1
-                pair_positions.setdefault(newq, set()).add(node)
-                heapq.heappush(heap, (-pair_counts[newq], newq))
-    timings['merge_loop'] = time.perf_counter() - merge_start
-    print(f"Completed merging, {len(merges)} merges created.")
+            if idx > 0:
+                new_left = (seq[idx-1], merged_token)
+                pair_cnt[new_left] += 1
+                pair_pos[new_left].add((d, idx-1))
+                heapq.heappush(heap, (-pair_cnt[new_left], new_left))
 
-    timings['total_time'] = time.perf_counter() - t0
+            if idx+1 < len(seq):
+                new_right = (merged_token, seq[idx+1])
+                pair_cnt[new_right] += 1
+                pair_pos[new_right].add((d, idx))
+                heapq.heappush(heap, (-pair_cnt[new_right], new_right))
 
-    print("BPE Training timings (seconds):")
-    for step, duration in timings.items():
-        print(f"  {step}: {duration:.4f}")
+    timings["merge_loop"] = time.perf_counter() - t_merge
+    timings["total"] = time.perf_counter() - t0
+
+    print("\n[BPE] Timing (seconds)")
+    for k, v in timings.items():
+        print(f"  {k:<14}: {v:.4f}")
 
     return tokenizer.vocab, merges
