@@ -1,7 +1,7 @@
 import heapq
 import time
 from typing import List, Tuple, Dict, Set, Union
-from cs336_basics.pretokenization import pretokenize_file
+from pretokenization import pretokenize_file
 from tokenizer import BPETokenizer
 from tqdm import tqdm
 from data_structures import DoublyLinkedList, Node
@@ -37,6 +37,7 @@ def train_bpe(
     pre_start = time.perf_counter()
     docs: List[DoublyLinkedList] = []
     for tok_bytes in pretokenize_file(str(input_path), special_tokens, num_processes):
+        print(tok_bytes[:10])
         dll = DoublyLinkedList()
         for b in tok_bytes:
             dll.append(b)

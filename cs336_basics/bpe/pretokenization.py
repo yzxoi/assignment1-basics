@@ -2,10 +2,12 @@ import os
 import mmap
 from typing import BinaryIO, List, Tuple, Iterable
 import regex as re
-import multiprocessing
+from tqdm import tqdm
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-_mm: mmap.mmap
+PAT_BYTES = re.compile(
+    rb"'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"
+)
 
 def find_chunk_boundaries(
     file: BinaryIO, 
@@ -55,54 +57,24 @@ def find_chunk_boundaries(
     # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
     return sorted(set(chunk_boundaries))
 
-def _init_mmap(input_path: str):
-    """
-    Initializer for worker processes: memory-map the entire file once.
-    """
-    global _mm
-    f = open(input_path, "rb")
-    _mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-
-
-def _process_chunk(range_pair: Tuple[int, int]) -> List[bytes]:
-    """
-    Process a byte-range [start, end) using the shared mmap, return pre-token bytes.
-    """
-    start, end = range_pair
-    chunk = _mm[start:end].decode('utf-8', errors='ignore')
-    toks = re.findall(PAT, chunk)
-    return [tok.encode('utf-8') for tok in toks]
-
 ## Usage
 # pretokenize_file("./data/TinyStoriesV2-GPT4-valid.txt",["<|endoftext|>"], 8)
 def pretokenize_file(
     input_path: str, 
     special_tokens: List[str],
     num_processes: int = 1
-) -> Iterable[List[bytes]]:
+) -> Iterable[List[str]]:
     """
     Pre-tokenize a file by finding boundaries for special tokens.
     Returns an iterable of (start, end) byte offsets for each chunk.
     """
     split_special_token = ''.join(special_tokens).encode('utf-8') if isinstance(special_tokens, list) else special_tokens.encode('utf-8')
-    with open(input_path, "rb") as f:
+    with open(input_path, 'rb') as f:
         boundaries = find_chunk_boundaries(f, num_processes, split_special_token)
     
-    chunks = [(start, end) for start, end in zip(boundaries[:-1], boundaries[1:])]
-
-    ctx = multiprocessing.get_context('fork')
-
-    if num_processes > 1:
-        with ctx.Pool(
-            processes=num_processes,
-            initializer=_init_mmap,
-            initargs=(input_path,)
-        ) as pool:
-            for tok_bytes in pool.map(_process_chunk, chunks):
-                yield tok_bytes
-    else:
-        # single process: setup mmap in main process
-        _init_mmap(input_path)
-        for start, end in chunks:
-            yield _process_chunk((start, end))
+        for start, end in tqdm(list(zip(boundaries[:-1], boundaries[1:])), desc="Pre-tokenizing file", unit="chunk"):
+            f.seek(start)
+            chunk = f.read(end - start)
+            toks = PAT_BYTES.findall(chunk)
+            yield toks
         
