@@ -63,7 +63,7 @@ def pretokenize_file(
     input_path: str, 
     special_tokens: List[str],
     num_processes: int = 1
-) -> Iterable[List[str]]:
+) -> Iterable[List[bytes]]:
     """
     Pre-tokenize a file by finding boundaries for special tokens.
     Returns an iterable of (start, end) byte offsets for each chunk.
