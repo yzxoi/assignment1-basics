@@ -1,10 +1,9 @@
 import heapq
 import time
 from typing import List, Tuple, Dict, Set, Union
-from pretokenization import pretokenize_file
-from tokenizer import BPETokenizer
+from .pretokenization import pretokenize_file
+from .tokenizer import BPETokenizer
 from tqdm import tqdm
-from data_structures import DoublyLinkedList, Node
 from collections import defaultdict
 
 Pos = Tuple[int, int]                 # (doc_id, index)

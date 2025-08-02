@@ -1,10 +1,9 @@
 import heapq
 import time
 from typing import List, Tuple, Dict, Set, Union
-from pretokenization import pretokenize_file
-from tokenizer import BPETokenizer
+from .pretokenization import pretokenize_file
+from .tokenizer import BPETokenizer
 from tqdm import tqdm
-from data_structures import DoublyLinkedList, Node
 from collections import defaultdict
 
 Pos = Tuple[int, int]                 # (doc_id, index)
@@ -34,85 +33,111 @@ def train_bpe(
 
     t = time.perf_counter()
     tokenizer = BPETokenizer(special_tokens)
+    special_ids = {
+        tokenizer.byte2id[token.encode("utf-8")]
+        for token in special_tokens
+    }
     timings["tokenizer_init"] = time.perf_counter() - t
 
     t = time.perf_counter()
-    docs: List[List[bytes]] = []
-    for tok_bytes in pretokenize_file(input_path, special_tokens, num_processes):
-        docs.append(list(tok_bytes))
+    chunks, word_freq = pretokenize_file(
+        input_path, special_tokens, num_processes
+    )
+    for _ in chunks:
+        pass
+    total_types = len(word_freq)
+    print(f"Total types: {total_types}")
+    # print(word_freq)
     timings["pretokenize"] = time.perf_counter() - t
-    print(f"[BPE] Loaded {len(docs):,} documents")
+    print(f"[BPE] Found {total_types:,} unique pre-tokens")
 
     t = time.perf_counter()
-    pair_cnt : Dict[Tuple[bytes, bytes], int]  = defaultdict(int)
-    pair_pos : Dict[Tuple[bytes, bytes], Set[Pos]] = defaultdict(set)
+    type_byteids: Dict[bytes, List[int]] = {}
+    pair_counts: Dict[Tuple[int, int], int] = defaultdict(int)
 
-    for d, seq in enumerate(docs):
-        for i, (a, b) in enumerate(zip(seq, seq[1:])):
-            pair = (a, b)
-            pair_cnt[pair] += 1
-            pair_pos[pair].add((d, i))
+    for word_bytes, freq in word_freq.items():
+        if word_bytes in tokenizer.byte2id:
+            byte_ids = [tokenizer.byte2id[word_bytes]]
+        else:
+            byte_ids = [tokenizer.byte2id[bytes([b])] for b in word_bytes]
+        if len(byte_ids) == 1 and byte_ids[0] in special_ids:
+            type_byteids[word_bytes] = byte_ids
+            continue
+        type_byteids[word_bytes] = byte_ids
+        for i in range(len(byte_ids) - 1):
+            pair = (byte_ids[i], byte_ids[i+1])
+            if pair[0] in special_ids or pair[1] in special_ids:
+                continue
+            pair_counts[pair] += freq
     timings["initial_count"] = time.perf_counter() - t
 
-    heap = [(-c, p) for p, c in pair_cnt.items()]
+    heap = [(-cnt, pair) for pair, cnt in pair_counts.items()]
     heapq.heapify(heap)
 
     merges: List[Tuple[bytes, bytes]] = []
-    pbar = tqdm(total=vocab_size - len(tokenizer.vocab), desc="Training BPE")
-
-    t_merge = time.perf_counter()
+    t = time.perf_counter()
     while len(tokenizer.vocab) < vocab_size and heap:
-        neg_freq, pair = heapq.heappop(heap)
-        freq = -neg_freq
-        if freq == 0 or pair_cnt[pair] != freq:
+        negcnt, pair = heapq.heappop(heap)
+        freq = -negcnt
+        # Skip stale or zero-count entries
+        if pair_counts.get(pair, 0) != freq or freq == 0:
+            continue
+        
+        tied = [pair]
+        while heap and heap[0][0] == negcnt:
+            _, p2 = heapq.heappop(heap)
+            if pair_counts.get(p2, 0) == freq:
+                tied.append(p2)
+        tied.sort(key=lambda pr: (tokenizer.vocab[pr[0]], tokenizer.vocab[pr[1]]), reverse=True)
+
+        selected = tied[0]
+        for p_other in tied[1:]:
+            heapq.heappush(heap, (-pair_counts[p_other], p_other))
+
+        pair = selected
+        if pair[0] in special_ids or pair[1] in special_ids:
+            pair_counts[pair] = 0
             continue
 
-        a, b = pair
-        merged_token = a + b
-        tokenizer.add_merge(pair)
-        merges.append(pair)
-        pbar.update(1)
+        id_a, id_b = pair
+        # Record merge as byte pair
+        merges.append((tokenizer.vocab[id_a], tokenizer.vocab[id_b]))
+        new_id = tokenizer.add_merge(pair)
 
-        positions = list(pair_pos[pair])
-        del pair_pos[pair]
-        pair_cnt[pair] = 0
+        pair_counts[pair] = 0
 
-        for d, idx in positions:
-            seq = docs[d]
-            if idx >= len(seq)-1 or seq[idx] != a or seq[idx+1] != b:
-                continue
+        for word_bytes, byte_ids in list(type_byteids.items()):
+            freq = word_freq[word_bytes]
+            i = 0
+            while i < len(byte_ids) - 1:
+                if byte_ids[i] == id_a and byte_ids[i+1] == id_b:
+                    if i > 0:
+                        left = (byte_ids[i-1], id_a)
+                        pair_counts[left] -= freq
+                        heapq.heappush(heap, (-pair_counts[left], left))
+                    if i+2 < len(byte_ids):
+                        right = (id_b, byte_ids[i+2])
+                        pair_counts[right] -= freq
+                        heapq.heappush(heap, (-pair_counts[right], right))
+                    byte_ids[i : i+2] = [new_id]
+                    if i > 0:
+                        new_left = (byte_ids[i-1], new_id)
+                        pair_counts[new_left] += freq
+                        heapq.heappush(heap, (-pair_counts[new_left], new_left))
+                    if i+1 < len(byte_ids):
+                        new_right = (new_id, byte_ids[i+1])
+                        pair_counts[new_right] += freq
+                        heapq.heappush(heap, (-pair_counts[new_right], new_right))
+                    # i += 1
+                i += 1
+        type_byteids = {w: ids for w, ids in type_byteids.items() if len(ids) > 1}
 
-            if idx > 0:
-                left_pair = (seq[idx-1], a)
-                pair_cnt[left_pair] -= 1
-                pair_pos[left_pair].discard((d, idx-1))
-                heapq.heappush(heap, (-pair_cnt[left_pair], left_pair))
-
-            if idx+2 < len(seq):
-                right_pair = (b, seq[idx+2])
-                pair_cnt[right_pair] -= 1
-                pair_pos[right_pair].discard((d, idx+1))
-                heapq.heappush(heap, (-pair_cnt[right_pair], right_pair))
-
-            seq[idx:idx+2] = [merged_token]
-
-            if idx > 0:
-                new_left = (seq[idx-1], merged_token)
-                pair_cnt[new_left] += 1
-                pair_pos[new_left].add((d, idx-1))
-                heapq.heappush(heap, (-pair_cnt[new_left], new_left))
-
-            if idx+1 < len(seq):
-                new_right = (merged_token, seq[idx+1])
-                pair_cnt[new_right] += 1
-                pair_pos[new_right].add((d, idx))
-                heapq.heappush(heap, (-pair_cnt[new_right], new_right))
-
-    timings["merge_loop"] = time.perf_counter() - t_merge
+    timings["merge_loop"] = time.perf_counter() - t
     timings["total"] = time.perf_counter() - t0
 
     print("\n[BPE] Timing (seconds)")
     for k, v in timings.items():
         print(f"  {k:<14}: {v:.4f}")
 
+    print(merges[:10])
     return tokenizer.vocab, merges
