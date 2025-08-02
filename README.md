@@ -1,5 +1,13 @@
 # CS336 Spring 2025 Assignment 1: Basics
 
+> Origin: [stanford-cs336/assignment1-basics](https://github.com/stanford-cs336/assignment1-basics/)
+
+This repo contains my personal solution to the assignment. (currently working on...)
+
+To see the report of my work, see [Report.md](./Report.md)
+
+Below is the original README.md
+
 For a full description of the assignment, see the assignment handout at
 [cs336_spring2025_assignment1_basics.pdf](./cs336_spring2025_assignment1_basics.pdf)
 

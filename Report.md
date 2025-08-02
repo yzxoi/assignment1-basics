@@ -57,3 +57,35 @@ c 0, 8 0
 
 然而 `\xc0\x81` 虽然字节格式合法，但它是对 `U+0001` 的超长编码，根据 UTF-8 规范同样被禁止。
 
+## Problem (train_bpe): BPE Tokenizer Training (15 points)
+
+见 cs336_basics/bpe，值得注意的几个点：
+1. 先 pretokenize 成单词，只统计词内的neighbor。
+2. 可能出现 aaaa，合并 a a 的情况，所以 merge 后的统计需要逐个计算。
+3. pretokenize 的时候，注意 special token 的处理，不能直接把 special_group 放在总模式的最前面，当文本中出现带前导空格的特殊符号（例如 " <|endoftext|>"）时，当前扫描位置在空格处，special_group 不能从空格开始匹配，随后分支  ?[^\s\p{L}\p{N}]+ 会把空格+< 等一起吃掉，导致整段 <|endoftext|> 没被识别为一个特殊 token。
+
+这里的做法是，先按“特殊 token”切，再对普通片段用原 PAT 切。
+
+并且在此逻辑下原始的 split chunk 部分也有 bug，应该直接对每个候选边界点，向后滚动读取 mini-chunk，携带 max_token_len-1 的尾部重叠，在拼接窗口中找任意特殊 token 的最早出现位置，确保不会漏掉跨块匹配。
+
+至此，即可 pass 全部 test_train_bpe.py 单元测试。
+
+## Problem (train_bpe_tinystories): BPE Training on TinyStories (2 points)
+
+[BPE] Timing (seconds)
+  tokenizer_init: 0.0001
+  pretokenize   : 176.1652
+  initial_count : 0.0964
+  merge_loop    : 241.8450
+  total         : 418.1071
+
+## Problem (train_bpe_expts_owt): BPE Training on OpenWebText (2 points)
+
+## Problem (tokenizer): Implementing the tokenizer (15 points)
+
+见 cs336_basics/bpe/tokenizer.py，值得注意的几个点：
+1. 跟 tokenizer 部分相同，注意对 special token 的处理。
+2. 出现重叠的 special token 如` <|endoftext|><|endoftext|>`，应当排序，从长的开始匹配。
+3. BPE 合并时应当按照从前往后 merge 的顺序进行。
+
+至此，即可 pass 全部 test_tokenizer.py 单元测试。
